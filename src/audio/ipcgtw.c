@@ -10,6 +10,7 @@
 #include <rtos/init.h>
 #include <ipc4/ipcgtw.h>
 #include <ipc4/copier.h>
+#include <sof/audio/ipcgtw_copier.h>
 
 static const struct comp_driver comp_ipcgtw;
 
@@ -21,23 +22,29 @@ DECLARE_SOF_RT_UUID("ipcgw", ipcgtw_comp_uuid, 0xa814a1ca, 0x0b83, 0x466c,
 
 DECLARE_TR_CTX(ipcgtw_comp_tr, SOF_UUID(ipcgtw_comp_uuid), LOG_LEVEL_INFO);
 
-/* Host communicates with IPC gateways via global IPC messages. To address a particular
- * IPC gateway, its node_id is sent in message payload. Hence we need to keep a list of existing
- * IPC gateways and their node_ids to search for a gateway host wants to address.
- */
-struct ipcgtw_data {
-	union ipc4_connector_node_id node_id;
-	struct comp_dev *dev;
-	struct list_item item;
-
-	/* IPC gateway buffer size comes in blob at creation time, we keep size here
-	 * to resize buffer later at ipcgtw_params().
-	 */
-	uint32_t buf_size;
-};
-
 /* List of existing IPC gateways */
 static struct list_item ipcgtw_list_head = LIST_INIT(ipcgtw_list_head);
+
+void ipcgtw_zephyr_new(struct ipcgtw_data *ipcgtw_data,
+		       const struct ipc4_copier_gateway_cfg *gtw_cfg,
+		       struct comp_dev *dev)
+{
+	const struct ipc4_ipc_gateway_config_blob *blob;
+
+	ipcgtw_data->node_id = gtw_cfg->node_id;
+	ipcgtw_data->dev = dev;
+
+	blob = (const struct ipc4_ipc_gateway_config_blob *)
+		((const struct ipc4_gateway_config_data *)gtw_cfg->config_data)->config_blob;
+
+	/* Endpoint buffer is created in copier with size specified in copier config. That buffer
+	 * will be resized to size specified in IPC gateway blob later in ipcgtw_params().
+	 */
+	comp_cl_dbg(&comp_ipcgtw, "ipcgtw_new(): buffer_size: %u", blob->buffer_size);
+	ipcgtw_data->buf_size = blob->buffer_size;
+
+	list_item_append(&ipcgtw_data->item, &ipcgtw_list_head);
+}
 
 static struct comp_dev *ipcgtw_new(const struct comp_driver *drv,
 				   const struct comp_ipc_config *config,
@@ -46,7 +53,6 @@ static struct comp_dev *ipcgtw_new(const struct comp_driver *drv,
 	struct comp_dev *dev;
 	struct ipcgtw_data *ipcgtw_data;
 	const struct ipc4_copier_gateway_cfg *gtw_cfg = spec;
-	const struct ipc4_ipc_gateway_config_blob *blob;
 
 	comp_cl_dbg(&comp_ipcgtw, "ipcgtw_new()");
 
@@ -68,31 +74,23 @@ static struct comp_dev *ipcgtw_new(const struct comp_driver *drv,
 
 	comp_set_drvdata(dev, ipcgtw_data);
 
-	ipcgtw_data->node_id = gtw_cfg->node_id;
-	ipcgtw_data->dev = dev;
-
-	blob = (const struct ipc4_ipc_gateway_config_blob *)
-		((const struct ipc4_gateway_config_data *)gtw_cfg->config_data)->config_blob;
-
-	/* Endpoint buffer is created in copier with size specified in copier config. That buffer
-	 * will be resized to size specified in IPC gateway blob later in ipcgtw_params().
-	 */
-	comp_cl_dbg(&comp_ipcgtw, "ipcgtw_new(): buffer_size: %u", blob->buffer_size);
-	ipcgtw_data->buf_size = blob->buffer_size;
-
-	list_item_append(&ipcgtw_data->item, &ipcgtw_list_head);
+	ipcgtw_zephyr_new(ipcgtw_data, gtw_cfg, dev);
 
 	dev->state = COMP_STATE_READY;
 	return dev;
+}
+
+void ipcgtw_zephyr_free(struct ipcgtw_data *ipcgtw_data)
+{
+	list_item_del(&ipcgtw_data->item);
+	rfree(ipcgtw_data);
 }
 
 static void ipcgtw_free(struct comp_dev *dev)
 {
 	struct ipcgtw_data *ipcgtw_data = comp_get_drvdata(dev);
 
-	list_item_del(&ipcgtw_data->item);
-
-	rfree(ipcgtw_data);
+	ipcgtw_zephyr_free(ipcgtw_data);
 	rfree(dev);
 }
 
